@@ -577,10 +577,21 @@ static void handle(Proxy *px, int cfd) {
 
 struct conn { Proxy *px; int fd; };
 
+/* Unbounded per-connection pthreads plus a host that closes the Resolver the
+ * moment the accept loop exits was a UAF on quit. Cap in-flight conns so a
+ * CONNECT storm cannot fork-bomb the process; extras reset, clients retry.
+ * 64 is above the jitter suite's default 24-way load and well under what a
+ * local DANE proxy ever needs. */
+#ifndef PROXY_CONN_MAX
+#define PROXY_CONN_MAX 64
+#endif
+static volatile int g_live;
+
 static void *conn_thread(void *a) {
     struct conn *c = a;
     handle(c->px, c->fd);
     free(c);
+    __sync_fetch_and_sub(&g_live, 1);
     return NULL;
 }
 
@@ -639,16 +650,26 @@ int proxy_serve_ctl(int lfd, X509 *root, EVP_PKEY *rootkey,
             if (errno == EMFILE || errno == ENFILE) poll(NULL, 0, 100);
             continue;
         }
+        if (__sync_add_and_fetch(&g_live, 1) > PROXY_CONN_MAX) {
+            __sync_fetch_and_sub(&g_live, 1);
+            close(cfd);
+            continue;
+        }
         struct conn *c = malloc(sizeof *c);
-        if (!c) { close(cfd); continue; }
+        if (!c) { __sync_fetch_and_sub(&g_live, 1); close(cfd); continue; }
         c->px = px;
         c->fd = cfd;
         pthread_t t;
-        if (pthread_create(&t, NULL, conn_thread, c) != 0) { free(c); close(cfd); continue; }
+        if (pthread_create(&t, NULL, conn_thread, c) != 0) {
+            __sync_fetch_and_sub(&g_live, 1);
+            free(c); close(cfd); continue;
+        }
         pthread_detach(t);
     }
-    /* px + contexts are intentionally not freed: detached per-connection
-     * threads may still hold them; the embedding host stops once at exit. */
+    /* Host closes the Resolver as soon as we return; in-flight handle() still
+     * calls px->resolve(px->ud). Drain before returning so that is not a UAF. */
+    while (__sync_add_and_fetch(&g_live, 0) > 0)
+        poll(NULL, 0, 50);
     return 0;
 }
 
