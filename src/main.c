@@ -118,6 +118,10 @@ static int cmd_serve(int argc, char **argv) {
         else return usage();
     }
     if (!db || !store) return usage();
+    if (strcmp(listen, "127.0.0.1") != 0 && strcmp(listen, "::1") != 0) {
+        fprintf(stderr, "serve: --listen must be 127.0.0.1 or ::1 (not a network service)\n");
+        return 1;
+    }
 
     X509 *root; EVP_PKEY *rk;
     if (!ca_root_ensure(&root, &rk)) { fprintf(stderr, "serve: no root CA\n"); return 1; }

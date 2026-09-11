@@ -101,8 +101,9 @@ int resolver_resolve(const char *sni, OriginInfo *out, void *ud) {
      * pepenet site's Kestrel :5001) without a loopback :443 alias. Off by
      * default, so origin.c stays pure and origin_test is unaffected. */
     if (ok) {
+        const char *allow = getenv("PEPENET_TLS_ALLOW_LOCAL_ORIGIN");
         const char *op = getenv("PEPENET_ORIGIN_PORT");
-        if (op && *op) {
+        if (allow && allow[0] && op && *op) {
             int p = atoi(op);
             if (p > 0 && p < 65536) out->port = (uint16_t)p;
         }

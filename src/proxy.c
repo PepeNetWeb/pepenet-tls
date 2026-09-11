@@ -17,6 +17,9 @@
 #include <errno.h>
 #include <pthread.h>
 #include <poll.h>
+#include <time.h>
+
+#define SPLICE_IDLE_S 120           /* drop a quiet tunnel; holds a jetsam slot */
 
 typedef struct {
     X509           *root;
@@ -481,11 +484,12 @@ static void splice(Proxy *px, SSL *b, SSL *o) {
      * "nothing more this direction" and returns, so the loop keeps serving both. */
     set_nonblock(fb);
     set_nonblock(fo);
+    time_t last = time(NULL);
     for (;;) {
         int moved = 0;
         if (buffered(b)) { if (!pump(b, o)) break; moved = 1; }
         if (buffered(o)) { if (!pump(o, b)) break; moved = 1; }
-        if (moved) continue;              /* re-check before trusting poll() */
+        if (moved) { last = time(NULL); continue; }
 
         /* poll(), not select(): FD_SET on a descriptor >= FD_SETSIZE (1024)
          * writes past the 128-byte fd_set on this thread's stack, and select()
@@ -493,8 +497,14 @@ static void splice(Proxy *px, SSL *b, SSL *o) {
          * fds per tunnel, so that is reachable rather than theoretical. */
         struct pollfd pf[2] = { { fb, POLLIN, 0 }, { fo, POLLIN, 0 } };
         if (px && px->stop && *px->stop) break;
-        if (poll(pf, 2, 500) < 0) break;
+        int pr = poll(pf, 2, 500);
+        if (pr < 0) break;
         if (px && px->stop && *px->stop) break;
+        if (pr == 0) {
+            if (time(NULL) - last >= SPLICE_IDLE_S) break;
+            continue;
+        }
+        last = time(NULL);
         if ((pf[0].revents & (POLLIN | POLLHUP | POLLERR)) && !pump(b, o)) break;
         if ((pf[1].revents & (POLLIN | POLLHUP | POLLERR)) && !pump(o, b)) break;
     }
