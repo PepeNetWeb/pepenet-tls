@@ -456,4 +456,11 @@ The cryptography is the easy part; **independence and namespace legitimacy are t
 - **Desktop embed.** Long-term the proxy rides in `pepenet-desktop` like the resolver/mesh;
   OpenSSL-vs-embeddable-TLS for that build is revisited then (v1 is the standalone daemon).
 - **DANE-TA (usage 2).** v1 pins DANE-EE (`3 1 1`) only — the CA-free case. TA support is a
-  later add if a `.doge` operator wants an intermediate.
+  later add if a `.doge` operator wants an intermediate. `origin_from_zone` now
+  **refuses** any other usage/selector/mtype (32-byte SHA-256 required).
+- **Origin address policy.** Loopback / RFC1918 / link-local / multicast A
+  records are not dialed (a `127.0.0.1` origin plus the lo0 `:443` rdr
+  recursed into the proxy). Origin TCP connect is capped at 5s.
+- **Trust-store plant.** `trust_install` refuses a PEM that is not the
+  in-process name-constrained root, then installs a temp copy.
+- Desktop threat model (P2P + proxy): `pepenet-desktop/docs/SECURITY.md`.

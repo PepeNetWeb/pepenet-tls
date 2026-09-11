@@ -219,7 +219,8 @@ int ca_leaf_mint(X509 *root, EVP_PKEY *rootkey, const char *name,
 
 static int save_root(X509 *cert, EVP_PKEY *key) {
     paths_init();
-    mkdir(g_dir, 0700);                                 /* ok if it exists */
+    mkdir(g_dir, 0700);
+    chmod(g_dir, 0700);                                 /* tighten a 0755 leftover */
 
     FILE *cf = fopen(g_crt, "wb");
     if (!cf) return 0;
@@ -244,8 +245,11 @@ static int load_root(X509 **cert, EVP_PKEY **key) {
     fclose(cf);
     if (!c) return 0;
 
-    FILE *kf = fopen(g_key, "rb");
-    if (!kf) { X509_free(c); return 0; }
+    int kfd = open(g_key, O_RDONLY);
+    if (kfd < 0) { X509_free(c); return 0; }
+    fchmod(kfd, 0600);
+    FILE *kf = fdopen(kfd, "rb");
+    if (!kf) { close(kfd); X509_free(c); return 0; }
     EVP_PKEY *k = PEM_read_PrivateKey(kf, NULL, NULL, NULL);
     fclose(kf);
     if (!k) { X509_free(c); return 0; }

@@ -1,23 +1,65 @@
 /* trust.c — see trust.h. */
 #include "trust.h"
+#include "ca.h"
 
+#include <openssl/pem.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+
+/* Only the in-process name-constrained root may enter a trust store. The PEM
+ * on disk is user-writable; we refuse a swapped unconstrained CA, then plant
+ * a temp copy of the in-memory cert so the install isn't a TOCTOU on the path. */
+static int file_is_our_root(const char *certpath) {
+    X509 *want = NULL; EVP_PKEY *k = NULL;
+    if (!ca_root_ensure(&want, &k)) return 0;
+    FILE *f = fopen(certpath, "rb");
+    X509 *got = f ? PEM_read_X509(f, NULL, NULL, NULL) : NULL;
+    if (f) fclose(f);
+    int ok = got && X509_cmp(want, got) == 0;
+    if (got) X509_free(got);
+    X509_free(want); EVP_PKEY_free(k);
+    return ok;
+}
+static int seal_root_tmp(char *path, size_t cap) {
+    X509 *want = NULL; EVP_PKEY *k = NULL;
+    if (!ca_root_ensure(&want, &k)) return 0;
+    snprintf(path, cap, "/tmp/pepenet-root-XXXXXX");
+    int fd = mkstemp(path);
+    if (fd < 0) { X509_free(want); EVP_PKEY_free(k); return 0; }
+    fchmod(fd, 0600);
+    FILE *f = fdopen(fd, "w");
+    int ok = f && PEM_write_X509(f, want);
+    if (f) fclose(f); else close(fd);
+    X509_free(want); EVP_PKEY_free(k);
+    if (!ok) { unlink(path); return 0; }
+    return 1;
+}
 
 #ifdef __APPLE__
 /* -r trustRoot marks it a trusted anchor; no -d ⇒ the user login keychain
  * (unprivileged). macOS pops a GUI auth dialog to change trust settings —
  * expected: the operator is consenting to install this root. */
 int trust_install(const char *certpath) {
+    if (!file_is_our_root(certpath)) {
+        fprintf(stderr, "trust_install: refusing PEM that is not this process's "
+                        "name-constrained root\n");
+        return 0;
+    }
+    char tmp[256];
+    if (!seal_root_tmp(tmp, sizeof tmp)) return 0;
     char cmd[1400];
     snprintf(cmd, sizeof cmd,
         "security add-trusted-cert -r trustRoot "
         "-k \"$HOME/Library/Keychains/login.keychain-db\" \"%s\"",
-        certpath);
-    return system(cmd) == 0;
+        tmp);
+    int ok = system(cmd) == 0;
+    unlink(tmp);
+    return ok;
 }
 
 int trust_uninstall(const char *certpath, const char *cn) {
@@ -161,8 +203,11 @@ static void nss_firefox_profiles(const char *base, const char *nick, const char 
 
 int trust_install(const char *certpath) {
     if (!certpath || !certpath[0]) return 0;
-    struct stat st;
-    if (stat(certpath, &st) != 0) return 0;
+    if (!file_is_our_root(certpath)) {
+        fprintf(stderr, "trust_install: refusing PEM that is not this process's "
+                        "name-constrained root\n");
+        return 0;
+    }
     /* No certutil → cannot write NSS. Deb Chromium/curl still pick the root
      * up from the system store; Snap Chromium/Firefox will not. */
     if (!have_certutil()) {
@@ -172,17 +217,22 @@ int trust_install(const char *certpath) {
     }
     const char *home = getenv("HOME");
     if (!home || !home[0]) return 0;
+    char tmp[256];
+    if (!seal_root_tmp(tmp, sizeof tmp)) return 0;
     char dir[512], nick[128], ff[700];
     nss_nick(certpath, nick, sizeof nick);
-    if (!nssdb_path(dir, sizeof dir) || !nss_add(dir, nick, certpath)) return 0;
-    nss_chromium_snaps(home, nick, certpath, 1);
-    snprintf(ff, sizeof ff, "%s/.mozilla/firefox", home);
-    nss_firefox_profiles(ff, nick, certpath, 1);
-    snprintf(ff, sizeof ff, "%s/snap/firefox/common/.mozilla/firefox", home);
-    nss_firefox_profiles(ff, nick, certpath, 1);
-    snprintf(ff, sizeof ff, "%s/snap/firefox/current/.mozilla/firefox", home);
-    nss_firefox_profiles(ff, nick, certpath, 1);
-    return 1;
+    int ok = nssdb_path(dir, sizeof dir) && nss_add(dir, nick, tmp);
+    if (ok) {
+        nss_chromium_snaps(home, nick, tmp, 1);
+        snprintf(ff, sizeof ff, "%s/.mozilla/firefox", home);
+        nss_firefox_profiles(ff, nick, tmp, 1);
+        snprintf(ff, sizeof ff, "%s/snap/firefox/common/.mozilla/firefox", home);
+        nss_firefox_profiles(ff, nick, tmp, 1);
+        snprintf(ff, sizeof ff, "%s/snap/firefox/current/.mozilla/firefox", home);
+        nss_firefox_profiles(ff, nick, tmp, 1);
+    }
+    unlink(tmp);
+    return ok;
 }
 
 int trust_uninstall(const char *certpath, const char *cn) {

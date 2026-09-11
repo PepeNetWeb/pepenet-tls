@@ -127,8 +127,10 @@ int origin_from_zone(const zone *z, const char *sub, const char *suffix,
     /* never dial loopback / unspecified / link-local: A=127.0.0.1 plus the
      * lo0 :443→proxy rdr recurses into this process until PROXY_CONN_MAX. */
     { unsigned b0 = a->rdata[0], b1 = a->rdata[1];
-      if (b0 == 0 || b0 == 127 || (b0 == 169 && b1 == 254) || b0 >= 224)
-          return 0; }
+      if (b0 == 0 || b0 == 127 || b0 == 10 || b0 >= 224) return 0;
+      if (b0 == 169 && b1 == 254) return 0;
+      if (b0 == 172 && b1 >= 16 && b1 <= 31) return 0;
+      if (b0 == 192 && b1 == 168) return 0; }
 
     /* TLSA lives at `_443._tcp` for the apex, or `_443._tcp.<sub>` otherwise. */
     char tlsa_label[80];
