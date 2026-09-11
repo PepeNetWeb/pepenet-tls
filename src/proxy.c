@@ -26,6 +26,7 @@ typedef struct {
     proxy_resolver  resolve;
     void           *ud;
     const ProxyEvents *ev;        /* may be NULL (CLI) */
+    volatile int   *stop;         /* host stop flag; splice polls it    */
 } Proxy;
 
 static void nosigpipe(int fd) {
@@ -429,7 +430,7 @@ static int pump(SSL *from, SSL *to) {
                  * spinning on it. */
                 struct pollfd wp = { SSL_get_fd(to),
                                      (short)(e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT), 0 };
-                if (poll(&wp, 1, -1) <= 0) return 0;
+                if (poll(&wp, 1, 500) <= 0) return 0;
                 continue;
             }
             off += w;
@@ -461,7 +462,7 @@ static void set_nonblock(int fd) {
 }
 
 /* Bidirectional plaintext relay between the two authenticated TLS sessions. */
-static void splice(SSL *b, SSL *o) {
+static void splice(Proxy *px, SSL *b, SSL *o) {
     int fb = SSL_get_fd(b), fo = SSL_get_fd(o);
 
     /* Both sides must be non-blocking for the relay to be safe.
@@ -491,7 +492,9 @@ static void splice(SSL *b, SSL *o) {
          * with nfds > FD_SETSIZE just fails with EINVAL. A busy proxy holds two
          * fds per tunnel, so that is reachable rather than theoretical. */
         struct pollfd pf[2] = { { fb, POLLIN, 0 }, { fo, POLLIN, 0 } };
-        if (poll(pf, 2, -1) <= 0) break;
+        if (px && px->stop && *px->stop) break;
+        if (poll(pf, 2, 500) < 0) break;
+        if (px && px->stop && *px->stop) break;
         if ((pf[0].revents & (POLLIN | POLLHUP | POLLERR)) && !pump(b, o)) break;
         if ((pf[1].revents & (POLLIN | POLLHUP | POLLERR)) && !pump(o, b)) break;
     }
@@ -532,7 +535,7 @@ static void handle(Proxy *px, int cfd) {
             if (px->ev && px->ev->verdict)
                 px->ev->verdict(px->ev->u, sni, r == DANE_OK, oi.host);
             if (r == DANE_OK) {
-                splice(b, o);
+                splice(px, b, o);
                 SSL_shutdown(o); close(ofd); SSL_free(o);
             } else {
                 /* One code per failure mode. Collapsing all three into a bare
@@ -623,6 +626,7 @@ int proxy_serve_ctl(int lfd, X509 *root, EVP_PKEY *rootkey,
     px->resolve = resolve;
     px->ud = ud;
     px->ev = ev;
+    px->stop = stop;
     px->client_ctx = dane_client_ctx();
     px->server_ctx = SSL_CTX_new(TLS_server_method());
     if (!px->client_ctx || !px->server_ctx) { free(px); return 1; }
