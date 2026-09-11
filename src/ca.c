@@ -177,6 +177,17 @@ static X509 *build_leaf(X509 *root, EVP_PKEY *rootkey,
         if (!okc) goto err;
     }
     if (strlen(name) > 253) goto err;
+    /* NC is the last line of defence; do not mint a name we would never
+     * knowingly sign. Must be a concrete FQDN under this box's one TLD. */
+    { size_t nl = strlen(name), tl = strlen(g_tld);
+      if (nl < tl + 2 || name[nl - tl - 1] != '.') goto err;
+      for (size_t i = 0; i < tl; i++) {
+          char a = name[nl - tl + i], b = g_tld[i];
+          if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
+          if (a != b) goto err;
+      }
+      for (const char *c = name; *c; c++) if (*c == '*') goto err;
+    }
 
     char san[300];
     snprintf(san, sizeof san, "DNS:%s", name);

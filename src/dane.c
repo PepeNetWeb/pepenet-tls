@@ -9,6 +9,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <poll.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -25,11 +28,26 @@ static int tcp_connect(const char *host, int port) {
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
     sa.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1 ||
-        connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+    if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
         close(fd);
         return -1;
     }
+    /* 5s cap: a name owner publishing a blackhole A used to pin a DANE
+     * thread in connect() until the kernel TCP timeout (minutes). */
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    int r = connect(fd, (struct sockaddr *)&sa, sizeof sa);
+    if (r != 0 && errno == EINPROGRESS) {
+        struct pollfd p = { fd, POLLOUT, 0 };
+        int err = 0; socklen_t el = sizeof err;
+        if (poll(&p, 1, 5000) == 1 &&
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) r = 0;
+    }
+    if (fl >= 0) fcntl(fd, F_SETFL, fl);
+    if (r != 0) { close(fd); return -1; }
+    struct timeval tv = { 5, 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     return fd;
 }
 

@@ -124,6 +124,11 @@ int origin_from_zone(const zone *z, const char *sub, const char *suffix,
         if (!inzone_label(tgt, z->apex, suffix, cur, sizeof cur)) return 0;
     }
     if (!a || a->rdlen != 4) return 0;
+    /* never dial loopback / unspecified / link-local: A=127.0.0.1 plus the
+     * lo0 :443→proxy rdr recurses into this process until PROXY_CONN_MAX. */
+    { unsigned b0 = a->rdata[0], b1 = a->rdata[1];
+      if (b0 == 0 || b0 == 127 || (b0 == 169 && b1 == 254) || b0 >= 224)
+          return 0; }
 
     /* TLSA lives at `_443._tcp` for the apex, or `_443._tcp.<sub>` otherwise. */
     char tlsa_label[80];
@@ -139,9 +144,13 @@ int origin_from_zone(const zone *z, const char *sub, const char *suffix,
     memset(out, 0, sizeof *out);
     if (!inet_ntop(AF_INET, a->rdata, out->host, sizeof out->host)) return 0;
     out->port     = 443;
-    out->usage    = t->rdata[0];
-    out->selector = t->rdata[1];
-    out->mtype    = t->rdata[2];
+    /* v1 is DANE-EE 3 1 1 only (DESIGN.md). Passing other usage/selector
+     * through to OpenSSL would let a zone pin a public CA (DANE-TA). */
+    if (t->rdata[0] != 3 || t->rdata[1] != 1 || t->rdata[2] != 1 || alen != 32)
+        return 0;
+    out->usage    = 3;
+    out->selector = 1;
+    out->mtype    = 1;
     memcpy(out->assoc, t->rdata + 3, alen);
     out->assoc_len = alen;
     return 1;
